@@ -1,10 +1,10 @@
 {
   "schemaVersion": 1,
   "id": "nvdk.monitor",
-  "name": "My Display",
+  "name": "Display arrange",
   "version": "1.0.0",
-  "author": "Omarchy",
-  "description": "Brightness slider and laptop display controls",
+  "author": "Ignacio Van Droogenbroeck",
+  "description": "Brightness, scale, and relative placement plus rotation for each display",
   "kinds": [
     "bar-widget"
   ],
@@ -12,8 +12,8 @@
     "barWidget": "Panel.qml"
   },
   "barWidget": {
-    "displayName": "My Display",
-    "description": "Brightness slider and laptop display controls",
+    "displayName": "Display arrange",
+    "description": "Brightness, scale, and relative placement plus rotation for each display",
     "category": "System",
     "allowMultiple": false
   },
