@@ -1,0 +1,212 @@
+#!/usr/bin/env python3
+"""Relative display placement + orientation for the Omarchy shell Display panel.
+
+Applies changes live via `hyprctl keyword` AND persists them into a managed
+block in ~/.config/hypr/monitors.lua, so they survive reload/logout.
+
+Usage:
+  nvdk-display-layout state
+  nvdk-display-layout place  <target-name> <left|right|above|below> <anchor-name>
+  nvdk-display-layout rotate <target-name> <0|90|180|270>
+  nvdk-display-layout mode   <target-name> <WIDTHxHEIGHT@RATE>
+  nvdk-display-layout persist
+"""
+
+import json
+import os
+import re
+import subprocess
+import sys
+
+MONITORS_LUA = os.path.expanduser("~/.config/hypr/monitors.lua")
+BEGIN = "-- >>> nvdk-display-layout: managed block, edited from the Display panel >>>"
+END = "-- <<< nvdk-display-layout: managed block <<<"
+INTERNAL_RE = re.compile(r"^(eDP|LVDS|DSI)-")
+
+
+def hypr(*args):
+    return subprocess.run(["hyprctl", *args], capture_output=True, text=True, check=True).stdout
+
+
+def load():
+    mons = json.loads(hypr("monitors", "all", "-j"))
+    out = []
+    for m in mons:
+        if m.get("disabled"):
+            continue
+        out.append({
+            "name": m["name"],
+            "description": (m.get("description") or "").strip(),
+            "internal": bool(INTERNAL_RE.match(m["name"])),
+            "focused": bool(m.get("focused")),
+            "x": int(m["x"]),
+            "y": int(m["y"]),
+            "width": int(m["width"]),
+            "height": int(m["height"]),
+            "refresh": float(m.get("refreshRate") or 60.0),
+            "scale": float(m.get("scale") or 1.0),
+            "transform": int(m.get("transform") or 0),
+        })
+    return out
+
+
+def logical(m):
+    """On-screen size after rotation and scaling. Odd transforms swap axes."""
+    w, h = m["width"], m["height"]
+    if m["transform"] % 2 == 1:
+        w, h = h, w
+    s = m["scale"] or 1.0
+    return int(round(w / s)), int(round(h / s))
+
+
+def find(mons, name):
+    for m in mons:
+        if m["name"] == name:
+            return m
+    for m in mons:
+        if m["description"] == name:
+            return m
+    sys.exit("no enabled monitor matching: %s" % name)
+
+
+def normalize(mons):
+    """Shift the whole arrangement so it starts at 0,0 - keeps the config tidy."""
+    if not mons:
+        return
+    dx = min(m["x"] for m in mons)
+    dy = min(m["y"] for m in mons)
+    for m in mons:
+        m["x"] -= dx
+        m["y"] -= dy
+
+
+def place(mons, target, side, anchor):
+    tw, th = logical(target)
+    aw, ah = logical(anchor)
+    if side == "left":
+        target["x"], target["y"] = anchor["x"] - tw, anchor["y"] + (ah - th) // 2
+    elif side == "right":
+        target["x"], target["y"] = anchor["x"] + aw, anchor["y"] + (ah - th) // 2
+    elif side == "above":
+        target["x"], target["y"] = anchor["x"] + (aw - tw) // 2, anchor["y"] - th
+    elif side == "below":
+        target["x"], target["y"] = anchor["x"] + (aw - tw) // 2, anchor["y"] + ah
+    else:
+        sys.exit("side must be one of: left right above below")
+    normalize(mons)
+
+
+def key(m):
+    """Stable identifier: description survives a port change, name does not."""
+    if m["internal"] or not m["description"]:
+        return m["name"]
+    return "desc:" + m["description"]
+
+
+def mode(m):
+    return "%dx%d@%.2f" % (m["width"], m["height"], m["refresh"])
+
+
+def lua_monitor(m):
+    parts = ['output = "%s"' % key(m),
+             'mode = "%s"' % mode(m),
+             'position = "%dx%d"' % (m["x"], m["y"]),
+             "scale = %g" % m["scale"]]
+    if m["transform"]:
+        parts.append("transform = %d" % m["transform"])
+    return "hl.monitor({ %s })" % ", ".join(parts)
+
+
+def apply_live(mons):
+    """`hyprctl keyword` is rejected under Omarchy's Lua config parser
+    ("keyword can't work with non-legacy parsers"), so drive it via `eval`."""
+    for m in mons:
+        subprocess.run(["hyprctl", "eval", lua_monitor(m)],
+                       capture_output=True, text=True)
+
+
+def lua_block(mons):
+    lines = [BEGIN,
+             "-- Rewritten by nvdk-display-layout. Hand edits here are overwritten;",
+             "-- add your own hl.monitor() lines above this block instead."]
+    for m in mons:
+        lines.append(lua_monitor(m))
+    lines.append(END)
+    return "\n".join(lines) + "\n"
+
+
+def persist(mons):
+    try:
+        with open(MONITORS_LUA) as fh:
+            text = fh.read()
+    except FileNotFoundError:
+        text = ""
+
+    pattern = re.compile(re.escape(BEGIN) + r".*?" + re.escape(END) + r"\n?", re.S)
+    block = lua_block(mons)
+    text = pattern.sub(block, text) if pattern.search(text) else \
+        text.rstrip("\n") + "\n\n" + block
+
+    # Write through a symlink rather than replacing it: monitors.lua is often
+    # symlinked into a dotfiles repo, and an atomic replace on the link path
+    # would silently swap the link for a regular file (cf. omarchy#7625).
+    target = os.path.realpath(MONITORS_LUA)
+    tmp = target + ".tmp"
+    with open(tmp, "w") as fh:
+        fh.write(text)
+    os.replace(tmp, target)
+
+
+def commit(mons):
+    apply_live(mons)
+    persist(mons)
+
+
+def main():
+    argv = sys.argv[1:]
+    if not argv:
+        sys.exit(__doc__)
+    cmd = argv[0]
+    mons = load()
+
+    if cmd == "state":
+        for m in mons:
+            m["logicalWidth"], m["logicalHeight"] = logical(m)
+        print(json.dumps(mons))
+    elif cmd == "place":
+        if len(argv) != 4:
+            sys.exit("usage: place <target> <left|right|above|below> <anchor>")
+        target, anchor = find(mons, argv[1]), find(mons, argv[3])
+        if target is anchor:
+            sys.exit("target and anchor are the same monitor")
+        place(mons, target, argv[2], anchor)
+        commit(mons)
+    elif cmd == "rotate":
+        if len(argv) != 3:
+            sys.exit("usage: rotate <target> <0|90|180|270>")
+        degrees = {"0": 0, "90": 1, "180": 2, "270": 3}
+        if argv[2] not in degrees:
+            sys.exit("rotation must be 0, 90, 180 or 270")
+        target = find(mons, argv[1])
+        target["transform"] = degrees[argv[2]]
+        normalize(mons)
+        commit(mons)
+    elif cmd == "mode":
+        if len(argv) != 3:
+            sys.exit("usage: mode <target> <WIDTHxHEIGHT@RATE>")
+        parsed = re.match(r"^(\d+)x(\d+)@([\d.]+)$", argv[2])
+        if not parsed:
+            sys.exit("mode must look like 2560x1440@100")
+        target = find(mons, argv[1])
+        target["width"] = int(parsed.group(1))
+        target["height"] = int(parsed.group(2))
+        target["refresh"] = float(parsed.group(3))
+        commit(mons)
+    elif cmd == "persist":
+        persist(mons)
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()
