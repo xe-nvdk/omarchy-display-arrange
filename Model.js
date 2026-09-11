@@ -79,6 +79,69 @@ function availableScales(scales, width, height) {
     .map(function(candidate) { return candidate.value })
 }
 
+// ---- Display modes (resolution + refresh rate) ----
+
+function parseMode(text) {
+  var parsed = /^(\d+)x(\d+)@([\d.]+)/.exec(String(text || ""))
+  if (!parsed) return null
+  return {
+    width: parseInt(parsed[1], 10),
+    height: parseInt(parsed[2], 10),
+    rate: parseFloat(parsed[3]),
+    resolution: parsed[1] + "x" + parsed[2]
+  }
+}
+
+// Distinct resolutions a display advertises, widest first.
+function resolutions(modes) {
+  var seen = {}
+  var out = []
+  for (var i = 0; i < (modes || []).length; i++) {
+    var parsed = parseMode(modes[i])
+    if (!parsed || seen[parsed.resolution]) continue
+    seen[parsed.resolution] = true
+    out.push({ resolution: parsed.resolution, pixels: parsed.width * parsed.height })
+  }
+  out.sort(function(a, b) { return b.pixels - a.pixels })
+  return out.map(function(entry) { return entry.resolution })
+}
+
+// Rates offered at one resolution, fastest first. Deduped by whole Hz, since
+// 119.88 and 120.00 read identically on a pill; the exact value kept is the
+// faster of each pair, and that is what gets applied.
+function refreshRates(modes, resolution) {
+  var byWholeHz = {}
+  for (var i = 0; i < (modes || []).length; i++) {
+    var parsed = parseMode(modes[i])
+    if (!parsed || parsed.resolution !== resolution) continue
+    var whole = Math.round(parsed.rate)
+    if (!(whole in byWholeHz) || parsed.rate > byWholeHz[whole]) byWholeHz[whole] = parsed.rate
+  }
+  return Object.keys(byWholeHz)
+    .map(function(whole) { return byWholeHz[whole] })
+    .sort(function(a, b) { return b - a })
+}
+
+function formatResolution(resolution) {
+  return String(resolution || "").replace("x", "\u00d7")
+}
+
+function formatRate(rate) {
+  return Math.round(Number(rate)) + " Hz"
+}
+
+function modeString(resolution, rate) {
+  return String(resolution) + "@" + Number(rate).toFixed(2)
+}
+
+function matchingRateIndex(rates, currentRate) {
+  var current = Math.round(Number(currentRate))
+  for (var i = 0; i < (rates || []).length; i++) {
+    if (Math.round(Number(rates[i])) === current) return i
+  }
+  return -1
+}
+
 function brightnessName(percent) {
   var p = Math.round(percent)
   if (p >= 95) return "Sun blast"
@@ -119,6 +182,13 @@ if (typeof module !== "undefined") {
     matchingScaleIndex: matchingScaleIndex,
     availableScales: availableScales,
     brightnessName: brightnessName,
-    parseDisplays: parseDisplays
+    parseDisplays: parseDisplays,
+    parseMode: parseMode,
+    resolutions: resolutions,
+    refreshRates: refreshRates,
+    formatResolution: formatResolution,
+    formatRate: formatRate,
+    modeString: modeString,
+    matchingRateIndex: matchingRateIndex
   }
 }

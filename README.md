@@ -1,13 +1,37 @@
-# Display arrange — relative placement and rotation in the Omarchy Display panel
+# Display arrange — placement, rotation, and mode picking in the Omarchy Display panel
 
-A fork of Omarchy's stock `omarchy.monitor` (Display) bar widget that adds an
-**ARRANGE** section: put each display left / right / above / below your laptop
-panel, and rotate any display 0° / 90° / 180° / 270° — without opening
-`monitors.lua`.
+A fork of Omarchy's stock `omarchy.monitor` (Display) bar widget that adds:
+
+- **RESOLUTION** and **REFRESH RATE**, so you can take a 144 Hz monitor off the
+  60 Hz mode it negotiated at boot without editing a config file
+- **ARRANGE**, to put each display left / right / above / below your laptop
+  panel and rotate any display 0° / 90° / 180° / 270°
+
+All of it without opening `monitors.lua`.
 
 Changes apply live *and* persist, so they survive `hyprctl reload` and logout.
 
 ![The Display panel with the ARRANGE section](docs/arrange.png)
+
+## Resolution and refresh rate
+
+Both target the focused display, the same way the stock SCALE row does, and
+both list only what the display actually advertises. The section hides itself
+on a panel with a single mode, since there is nothing there to pick.
+
+Refresh rates are deduplicated to whole Hz, because a list offering both
+"119.88 Hz" and "120.00 Hz" is noise. The faster exact value in each pair is
+the one applied, so the 144 Hz pill really sets 143.98.
+
+Picking a new resolution takes the fastest rate that resolution offers, which
+is the choice you would have made by hand anyway.
+
+![The RESOLUTION and REFRESH RATE sections](docs/modes.png)
+
+A resolution change moves a display's edges, which would otherwise leave a gap
+or an overlap in a multi-display arrangement. So after a mode change the
+layout is re-seated: every display keeps the side of the anchor it was already
+on, at its new size.
 
 ## Why relative placement instead of drag-and-drop
 
@@ -93,11 +117,18 @@ nvdk-display-layout persist                        # snapshot live layout into m
 
 Targets match on connector name first, then on description.
 
+`mode` snaps the rate to the closest one the display advertises at that
+resolution, so `2560x1440@144` finds the real 143.98 Hz mode rather than
+failing on the two-hundredths it was off by. `state` reports each display's
+full mode list, which is what the panel builds its pills from.
+
 ## Known limitations
 
-- **Mouse only.** The panel's keyboard cursor is a one-dimensional section
-  walker; wiring a per-display grid into it risked breaking the existing
-  navigation, so the ARRANGE controls aren't reachable by keyboard yet.
+- **ARRANGE is mouse only.** The panel's keyboard cursor is a one-dimensional
+  section walker; wiring a per-display grid into it risked breaking the
+  existing navigation, so the ARRANGE controls aren't reachable by keyboard
+  yet. RESOLUTION and REFRESH RATE are: `j`/`k` steps between sections, `h`/`l`
+  walks the pills, `Enter` applies.
 - **One anchor.** With three or more displays you can't place two on the same
   side of the anchor.
 - **Clamshell mode fights it.** While docked, the clamshell watcher re-applies
