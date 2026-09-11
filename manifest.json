@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "nvdk.monitor",
   "name": "Display arrange",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "author": "Ignacio Van Droogenbroeck",
   "description": "Brightness, scale, and relative placement plus rotation for each display",
   "kinds": [

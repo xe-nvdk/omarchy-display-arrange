@@ -54,6 +54,10 @@ Panel {
   //   "scale"      - 6 Button scale presets; treated as a single
   //                  horizontal row from j/k's perspective. h/l moves
   //                  between presets, identical to bluetooth's header.
+  //   "resolution" - mode presets for the focused display; like "scale",
+  //                  one horizontal row from j/k's perspective even when the
+  //                  pills wrap onto several visual rows.
+  //   "refresh"    - refresh rates offered at the chosen resolution.
   //   "monitors"   - vertical display row list for enabling/disabling displays;
   //                  j/k walks each row.
   // Mouse hover on a target updates root state via the components' `hovered`
@@ -67,6 +71,28 @@ Panel {
     }
     return scalePresets
   }
+  // Resolution and refresh rate target the focused display, the same way
+  // SCALE does. The mode list rides along on `arrangement`, because
+  // `omarchy-monitor-state` doesn't report one.
+  readonly property var focusedDisplay: {
+    var list = root.arrangement || []
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] && list[i].focused) return list[i]
+    }
+    return list.length > 0 ? list[0] : null
+  }
+  readonly property var focusedModes: focusedDisplay && focusedDisplay.modes ? focusedDisplay.modes : []
+  // hyprctl reports width/height as the mode, unrotated, which is exactly
+  // what the resolution pills are keyed on.
+  readonly property string activeResolution: focusedDisplay
+    ? focusedDisplay.width + "x" + focusedDisplay.height
+    : ""
+  readonly property var resolutionValues: Model.resolutions(focusedModes)
+  readonly property var refreshValues: Model.refreshRates(focusedModes, activeResolution)
+  // Nothing to pick on a laptop panel that advertises one mode, so the whole
+  // section stays out of the way there.
+  readonly property bool modesAvailable: resolutionValues.length > 1 || refreshValues.length > 1
+
   property string focusSection: "scale"
   property int selectedIndex: 0
   property bool cursorActive: false
@@ -94,6 +120,10 @@ Panel {
     if (brightnessAvailable) list.push("brightness")
     list.push("textsize")
     list.push("scale")
+    if (modesAvailable) {
+      list.push("resolution")
+      list.push("refresh")
+    }
     if (displays.length > 1) list.push("monitors")
     return list
   }
@@ -102,13 +132,17 @@ Panel {
     if (section === "brightness") return 0  // only the slider sentinel at -1
     if (section === "textsize") return 0    // slider sentinel at -1, like brightness
     if (section === "scale") return scaleValues.length
+    if (section === "resolution") return resolutionValues.length
+    if (section === "refresh") return refreshValues.length
     if (section === "monitors") return displays.length
     return 0
   }
 
   function sectionIsSingleRow(section) {
-    // brightness and text size are lone sliders; scale presets sit horizontally.
-    return section === "brightness" || section === "textsize" || section === "scale"
+    // brightness and text size are lone sliders; the pill grids each behave as
+    // one horizontal row, so j/k steps past them rather than through them.
+    return section === "brightness" || section === "textsize"
+      || section === "scale" || section === "resolution" || section === "refresh"
   }
 
   function sectionFirstIndex(section) {
@@ -146,14 +180,15 @@ Panel {
     }
   }
 
-  // h/l: in scale section, walks the preset row; everywhere else, no-op
-  // because adjustBrightness handles horizontal motion on the brightness
-  // slider.
+  // h/l: walks whichever pill row holds the cursor. The slider sections take
+  // horizontal motion themselves (adjustBrightness / adjustTextSize), so they
+  // never reach here.
   function moveCursorH(delta) {
-    if (focusSection !== "scale") return
+    var count = sectionCount(focusSection)
+    if (count <= 0) return
     var next = selectedIndex + delta
     if (next < 0) next = 0
-    if (next > scaleValues.length - 1) next = scaleValues.length - 1
+    if (next > count - 1) next = count - 1
     selectedIndex = next
   }
 
@@ -166,6 +201,14 @@ Panel {
   function activateCursor() {
     if (focusSection === "scale" && selectedIndex >= 0 && selectedIndex < scaleValues.length) {
       setScale(scaleValues[selectedIndex])
+      return
+    }
+    if (focusSection === "resolution" && selectedIndex >= 0 && selectedIndex < resolutionValues.length) {
+      setResolution(resolutionValues[selectedIndex])
+      return
+    }
+    if (focusSection === "refresh" && selectedIndex >= 0 && selectedIndex < refreshValues.length) {
+      setMode(activeResolution, refreshValues[selectedIndex])
       return
     }
     if (focusSection === "monitors" && selectedIndex >= 0 && selectedIndex < displays.length) {
@@ -347,6 +390,26 @@ Panel {
     if (!layoutProc.running) layoutProc.running = true
   }
 
+  function activeRefreshIndex() {
+    return focusedDisplay ? Model.matchingRateIndex(refreshValues, focusedDisplay.refresh) : -1
+  }
+
+  // Applies live and rewrites the managed block, same path as place/rotate.
+  function setMode(resolution, rate) {
+    if (!root.focusedDisplay || !resolution) return
+    layoutProc.command = ["nvdk-display-layout", "mode", root.focusedDisplay.name,
+                          Model.modeString(resolution, rate)]
+    if (!layoutProc.running) layoutProc.running = true
+  }
+
+  // Switching resolution takes the fastest rate that resolution offers, which
+  // is the choice anyone picking a resolution would make by hand anyway.
+  function setResolution(resolution) {
+    var rates = Model.refreshRates(root.focusedModes, resolution)
+    if (!rates.length) return
+    setMode(resolution, rates[0])
+  }
+
   function setScale(scale) {
     actionProc.command = ["bash", "-c", "omarchy-hyprland-monitor-scaling " + scale]
     if (!actionProc.running) actionProc.running = true
@@ -414,6 +477,8 @@ Panel {
   onBrightnessAvailableChanged: clampCursor()
   onDisplaysChanged: clampCursor()
   onScaleValuesChanged: clampCursor()
+  onResolutionValuesChanged: clampCursor()
+  onRefreshValuesChanged: clampCursor()
   onVisibleSectionsChanged: clampCursor()
 
   // Only poll while the panel is open; the bar glyph tracks monitor count via
@@ -571,7 +636,7 @@ Panel {
         else if (dx !== 0) {
           if (root.focusSection === "brightness") root.adjustBrightness(dx * 5)
           else if (root.focusSection === "textsize") root.adjustTextSize(dx)
-          else if (root.focusSection === "scale") root.moveCursorH(dx)
+          else root.moveCursorH(dx)
         }
       }
       onActivateRequested: if (root.cursorActive) root.activateCursor()
@@ -856,6 +921,105 @@ Panel {
             }
           }
 
+          // ---------- Resolution + refresh rate ----------
+          PanelSeparator {
+            visible: root.modesAvailable
+            foreground: root.bar.foreground
+          }
+
+          Column {
+            width: parent.width
+            spacing: Style.space(10)
+            visible: root.modesAvailable
+
+            Item {
+              width: parent.width
+              implicitHeight: Math.max(resolutionHeader.implicitHeight, resolutionMonitor.implicitHeight)
+
+              PanelSectionHeader {
+                id: resolutionHeader
+                text: "RESOLUTION"
+                foreground: root.bar.foreground
+                fontFamily: root.bar.fontFamily
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+              }
+
+              // Same as SCALE: name the display being changed once there is
+              // more than one to confuse it with.
+              Text {
+                id: resolutionMonitor
+                text: root.focusedDisplay ? root.focusedDisplay.name : ""
+                visible: text !== "" && root.enabledDisplayCount > 1
+                color: Qt.darker(root.bar.foreground, 1.4)
+                font.family: root.bar.fontFamily
+                font.pixelSize: Style.font.caption
+                font.bold: true
+                anchors.right: parent.right
+                anchors.rightMargin: Style.space(6)
+                anchors.verticalCenter: parent.verticalCenter
+              }
+            }
+
+            // Three columns because a "2560×1440" pill needs the room; the
+            // grid wraps onto as many rows as the display has resolutions.
+            Grid {
+              id: resolutionRow
+              width: parent.width
+              columns: 3
+              spacing: Style.spacing.xs
+
+              readonly property real cellWidth: (width - spacing * (columns - 1)) / columns
+
+              Repeater {
+                model: root.resolutionValues
+
+                ModePill {
+                  required property string modelData
+                  required property int index
+
+                  text: Model.formatResolution(modelData)
+                  width: resolutionRow.cellWidth
+                  section: "resolution"
+                  pillIndex: index
+                  active: modelData === root.activeResolution
+                  onClicked: root.setResolution(modelData)
+                }
+              }
+            }
+
+            PanelSectionHeader {
+              text: "REFRESH RATE"
+              foreground: root.bar.foreground
+              fontFamily: root.bar.fontFamily
+            }
+
+            Grid {
+              id: refreshRow
+              width: parent.width
+              columns: 4
+              spacing: Style.spacing.xs
+
+              readonly property real cellWidth: (width - spacing * (columns - 1)) / columns
+
+              Repeater {
+                model: root.refreshValues
+
+                ModePill {
+                  required property real modelData
+                  required property int index
+
+                  text: Model.formatRate(modelData)
+                  width: refreshRow.cellWidth
+                  section: "refresh"
+                  pillIndex: index
+                  active: root.activeRefreshIndex() === index
+                  onClicked: root.setMode(root.activeResolution, modelData)
+                }
+              }
+            }
+          }
+
           // ---------- Monitors ----------
           PanelSeparator {
             visible: root.displays.length > 1
@@ -947,6 +1111,30 @@ Panel {
       root.cursorActive = true
       root.focusSection = "scale"
       root.selectedIndex = pill.scaleIndex
+    }
+  }
+
+  // A pill in one of the mode grids. `section` keeps the shared cursor model
+  // pointed at the right row, so hover and j/k/h/l agree on the highlight.
+  component ModePill: Button {
+    id: modePill
+    required property string section
+    required property int pillIndex
+
+    fontSize: Style.font.caption
+    foreground: root.bar.foreground
+    fontFamily: root.bar.fontFamily
+    horizontalPadding: Style.spacing.xs
+    verticalPadding: Style.spacing.controlPaddingY
+    bordered: true
+
+    hasCursor: root.cursorActive && root.focusSection === modePill.section
+      && root.selectedIndex === modePill.pillIndex
+    onHovered: function(isHovered) {
+      if (!isHovered || root.reflowingText) return
+      root.cursorActive = true
+      root.focusSection = modePill.section
+      root.selectedIndex = modePill.pillIndex
     }
   }
 

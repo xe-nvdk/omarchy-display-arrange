@@ -9,6 +9,8 @@ Usage:
   nvdk-display-layout place  <target-name> <left|right|above|below> <anchor-name>
   nvdk-display-layout rotate <target-name> <0|90|180|270>
   nvdk-display-layout mode   <target-name> <WIDTHxHEIGHT@RATE>
+                             (RATE snaps to the closest rate the display
+                              advertises at that resolution)
   nvdk-display-layout persist
 """
 
@@ -22,6 +24,7 @@ MONITORS_LUA = os.path.expanduser("~/.config/hypr/monitors.lua")
 BEGIN = "-- >>> nvdk-display-layout: managed block, edited from the Display panel >>>"
 END = "-- <<< nvdk-display-layout: managed block <<<"
 INTERNAL_RE = re.compile(r"^(eDP|LVDS|DSI)-")
+MODE_RE = re.compile(r"^(\d+)x(\d+)@([\d.]+)")
 
 
 def hypr(*args):
@@ -46,8 +49,69 @@ def load():
             "refresh": float(m.get("refreshRate") or 60.0),
             "scale": float(m.get("scale") or 1.0),
             "transform": int(m.get("transform") or 0),
+            "modes": dedupe(m.get("availableModes") or []),
         })
     return out
+
+
+def dedupe(items):
+    """Preserve order, drop repeats - hyprctl lists some modes twice."""
+    seen = set()
+    out = []
+    for item in items:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def parse_mode(text):
+    parsed = MODE_RE.match(str(text).strip())
+    if not parsed:
+        return None
+    return int(parsed.group(1)), int(parsed.group(2)), float(parsed.group(3))
+
+
+def pick_mode(target, width, height, rate):
+    """Closest advertised rate at the requested resolution.
+
+    Lets `mode HDMI-A-1 2560x1440@144` land on the real 143.98 Hz mode
+    instead of failing on the two-hundredths it was off by.
+    """
+    candidates = [c for c in (parse_mode(t) for t in target.get("modes") or [])
+                  if c and c[0] == width and c[1] == height]
+    if not candidates:
+        sys.exit("%s has no %dx%d mode. Available: %s"
+                 % (target["name"], width, height,
+                    ", ".join(target.get("modes") or []) or "none"))
+    return min(candidates, key=lambda c: abs(c[2] - rate))
+
+
+def anchor_of(mons):
+    """The display everything else is placed against, matching the panel's
+    rule: the built-in panel if there is one, otherwise the first display."""
+    if len(mons) < 2:
+        return None
+    for m in mons:
+        if m["internal"]:
+            return m
+    return mons[0]
+
+
+def side_of(anchor, m):
+    """Which side of the anchor m currently sits on; "" if it overlaps or
+    sits diagonally."""
+    aw, ah = logical(anchor)
+    mw, mh = logical(m)
+    if m["x"] + mw <= anchor["x"]:
+        return "left"
+    if m["x"] >= anchor["x"] + aw:
+        return "right"
+    if m["y"] + mh <= anchor["y"]:
+        return "above"
+    if m["y"] >= anchor["y"] + ah:
+        return "below"
+    return ""
 
 
 def logical(m):
@@ -194,13 +258,29 @@ def main():
     elif cmd == "mode":
         if len(argv) != 3:
             sys.exit("usage: mode <target> <WIDTHxHEIGHT@RATE>")
-        parsed = re.match(r"^(\d+)x(\d+)@([\d.]+)$", argv[2])
+        parsed = parse_mode(argv[2])
         if not parsed:
             sys.exit("mode must look like 2560x1440@100")
         target = find(mons, argv[1])
-        target["width"] = int(parsed.group(1))
-        target["height"] = int(parsed.group(2))
-        target["refresh"] = float(parsed.group(3))
+
+        # Where every other display sits right now, measured before the
+        # resize. A resolution change moves the target's edges, so without
+        # re-seating them the arrangement is left with a gap or an overlap.
+        anchor = anchor_of(mons)
+        sides = {}
+        if anchor:
+            for m in mons:
+                if m is not anchor:
+                    sides[m["name"]] = side_of(anchor, m)
+
+        target["width"], target["height"], target["refresh"] = pick_mode(
+            target, parsed[0], parsed[1], parsed[2])
+
+        if anchor:
+            for m in mons:
+                if m is not anchor and sides.get(m["name"]):
+                    place(mons, m, sides[m["name"]], anchor)
+        normalize(mons)
         commit(mons)
     elif cmd == "persist":
         persist(mons)
